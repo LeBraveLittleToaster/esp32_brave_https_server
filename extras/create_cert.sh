@@ -1,55 +1,78 @@
 #!/bin/bash
-set -e
-#------------------------------------------------------------------------------
-# cleanup any previously created files
+set -euo pipefail
 rm -f exampleca.* example.* cert.h private_key.h
 
-#------------------------------------------------------------------------------
-# create a CA called "myca"
+# ------------------------------
+# Create a real CA (with CA:TRUE) using 4096-bit key
+openssl genrsa -out exampleca.key 4096
 
-# create a private key
-openssl genrsa -out exampleca.key 1024
-
-# create certificate
-cat > exampleca.conf << EOF  
+cat > exampleca.conf << 'EOF'
 [ req ]
-distinguished_name     = req_distinguished_name
 prompt                 = no
-[ req_distinguished_name ]
-C = DE
+distinguished_name     = dn
+x509_extensions        = v3_ca
+
+[ dn ]
+C  = DE
 ST = BE
-L = Berlin
-O = MyCompany
+L  = Berlin
+O  = MyCompany
 CN = myca.local
+
+[ v3_ca ]
+basicConstraints       = critical, CA:true, pathlen:0
+keyUsage               = critical, keyCertSign, cRLSign
+subjectKeyIdentifier   = hash
+authorityKeyIdentifier = keyid:always,issuer
 EOF
-openssl req -new -x509 -days 3650 -key exampleca.key -out exampleca.crt -config exampleca.conf
-# create serial number file
+
+openssl req -new -x509 -days 3650 -sha256 \
+  -key exampleca.key -out exampleca.crt -config exampleca.conf
+
+# Create serial file automatically (or let -CAcreateserial do it)
 echo "01" > exampleca.srl
 
-#------------------------------------------------------------------------------
-# create a certificate for the ESP (hostname: "myesp")
-
-# create a private key
+# ------------------------------
+# Create server key + CSR with proper extensions + SAN
 openssl genrsa -out example.key 1024
-# create certificate signing request
-cat > example.conf << EOF  
+
+cat > example.conf << 'EOF'
 [ req ]
-distinguished_name     = req_distinguished_name
-prompt                 = no
-[ req_distinguished_name ]
-C = DE
+prompt             = no
+distinguished_name = dn
+req_extensions     = v3_req
+
+[ dn ]
+C  = DE
 ST = BE
-L = Berlin
-O = MyCompany
+L  = Berlin
+O  = MyCompany
 CN = esp32.local
+
+[ v3_req ]
+basicConstraints   = CA:false
+keyUsage           = critical, digitalSignature, keyEncipherment
+extendedKeyUsage   = serverAuth, clientAuth
+subjectAltName     = @alt_names
+
+[ alt_names ]
+DNS.1 = esp32.local
+DNS.2 = myesp
 EOF
-openssl req -new -key example.key -out example.csr -config example.conf
 
-# have myca sign the certificate
-openssl x509 -days 3650 -CA exampleca.crt -CAkey exampleca.key -in example.csr -req -out example.crt
+openssl req -new -sha256 -key example.key -out example.csr -config example.conf
 
-# verify
+# Sign leaf cert with the CA, carrying over the server extensions
+openssl x509 -req -days 3650 -sha256 \
+  -in example.csr -CA exampleca.crt -CAkey exampleca.key \
+  -CAserial exampleca.srl \
+  -extfile example.conf -extensions v3_req \
+  -out example.crt
+
+echo "-- verifying openssl certificate now ---"
 openssl verify -CAfile exampleca.crt example.crt
+
+echo "--- verifying openssl certificate finished ---"
 
 # convert private key and certificate into DER format
 openssl rsa -in example.key -outform DER -out example.key.DER
